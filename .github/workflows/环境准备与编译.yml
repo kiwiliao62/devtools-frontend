@@ -126,12 +126,7 @@ jobs:
           echo "🚀 编译日志"
           echo "======================================================"
           # 尝试编译元目标，保留完整日志
-          if gn ls out/Default | grep -q "^//:devtools_frontend_resources$"; then
             autoninja -C out/Default :devtools_frontend_resources
-          else
-            autoninja -C out/Default 2>&1 | tee autoninja-build.log
-          fi
-
       # ========== 新增：编译后 - front_end源码单独打包上传 ==========
       - name: 打包front_end源码目录（编译后）
         run: |
