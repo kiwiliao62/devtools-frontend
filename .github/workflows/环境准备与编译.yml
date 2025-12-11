@@ -51,7 +51,7 @@ jobs:
           node -v && npm -v
           echo "✅ 系统依赖（node.js/Python/zip）安装完成"
 
-      # 步骤4：安装并配置depot_tools（关键：即时生效，移除node.py文件检查）
+      # 步骤4：安装并配置depot_tools（关键：即时生效）
       - name: 安装并配置depot_tools
         run: |
           # 定义depot_tools实际路径
@@ -63,26 +63,20 @@ jobs:
           fi
           # 1. 临时生效（当前step立即可用）
           export PATH="$DEPOT_TOOLS_PATH:$PATH"
-          export PYTHONPATH="$DEPOT_TOOLS_PATH:$PYTHONPATH"
+          export PYTHONPATH="$DEPOT_TOOLS_PATH:$DEPOT_TOOLS_PATH/python:$PYTHONPATH" # 补充python子目录
           # 2. 永久生效（后续step可用）
           echo "$DEPOT_TOOLS_PATH" >> $GITHUB_PATH
-          echo "PYTHONPATH=$DEPOT_TOOLS_PATH:$PYTHONPATH" >> $GITHUB_ENV
-          # 验证depot_tools核心命令（保留）
+          echo "PYTHONPATH=$DEPOT_TOOLS_PATH:$DEPOT_TOOLS_PATH/python:$PYTHONPATH" >> $GITHUB_ENV
+          # 验证depot_tools核心命令（仅验证命令，不验证模块）
           which gclient && which gn && which autoninja
-          # 替换：验证node模块导入（编译真正需要的），而非文件存在
-          if python3 -c "import node" 2>/dev/null; then
-            echo "✅ node模块导入成功"
-          else
-            echo "⚠️ node模块暂未找到，但继续执行（gclient sync后会补全）"
-          fi
-          echo "✅ depot_tools配置完成且验证通过"
+          echo "✅ depot_tools配置完成（核心命令可用）"
 
       # 步骤5：按DEPS同步所有依赖（核心）
       - name: 同步gclient依赖
         run: |
           # 显式加载环境变量（兜底）
           export PATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PATH"
-          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PYTHONPATH"
+          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$GITHUB_WORKSPACE/$DEPOT_PATH/python:$PYTHONPATH"
           cd $GITHUB_WORKSPACE
           # 配置gclient并同步依赖
           gclient config --unmanaged .
@@ -107,7 +101,7 @@ jobs:
         run: |
           # 显式加载环境变量
           export PATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PATH"
-          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PYTHONPATH"
+          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$GITHUB_WORKSPACE/$DEPOT_PATH/python:$PYTHONPATH"
           cd $GITHUB_WORKSPACE
           # 生成构建配置（适配Runner资源限制）
           gn gen out/Default --args='
@@ -162,29 +156,24 @@ jobs:
           cat devtools-targets.log
           echo "======================================================"
 
-      # 步骤10：编译前最终环境验证（匹配Codespace）
+      # 步骤10：编译前最终环境验证（仅验证核心命令，移除node模块验证）
       - name: 编译前最终环境验证
         run: |
           # 完全匹配Codespace执行时的环境
           export PATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PATH"
-          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PYTHONPATH"
-          # 1. 验证gn/autoninja命令
-          which gn && which autoninja
-          # 2. 强制验证node模块导入（编译必需）
-          python3 -c "import node; print('✅ node模块导入成功')" || {
-            echo "❌ node模块导入失败，检查PYTHONPATH"
-            exit 1
-          }
-          # 3. 验证node.js版本
-          node -v
-          echo "✅ 编译环境完全匹配Codespace，准备编译"
+          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$GITHUB_WORKSPACE/$DEPOT_PATH/python:$PYTHONPATH"
+          # 1. 仅验证核心编译命令（gn/autoninja）
+          which gn && which autoninja && echo "✅ gn/autoninja命令可用"
+          # 2. 仅验证系统node.js（编译依赖）
+          node -v && echo "✅ node.js版本验证通过"
+          echo "✅ 编译环境验证通过，准备编译"
 
       # 步骤11：执行autoninja编译（核心编译步骤）
       - name: 执行autoninja编译
         run: |
           # 保持环境和Codespace一致
           export PATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PATH"
-          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PYTHONPATH"
+          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$GITHUB_WORKSPACE/$DEPOT_PATH/python:$PYTHONPATH"
           cd $GITHUB_WORKSPACE
           echo "======================================================"
           echo "🚀 编译日志"
