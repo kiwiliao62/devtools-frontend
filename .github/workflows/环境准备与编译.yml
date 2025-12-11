@@ -1,9 +1,28 @@
+name: 一站式编译构建_devtools_frontend（全产物上传版）
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo-url:
+        required: true
+        type: string
+        default: 'kiwiliao62/devtools-frontend'
+      branch:
+        required: true
+        type: string
+        default: 'main'
+
+env:
+  ARTIFACT_RETENTION_DAYS: 7
+  DEPOT_PATH: "third_party/depot_tools"
+
 jobs:
   build-all:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - name: 拉取主仓库+全量子模块（确保单层目录）
+      # 步骤1：拉取主仓库+全量子模块（确保单层目录）
+      - name: 拉取主仓库+全量子模块
         uses: actions/checkout@v3
         with:
           repository: ${{ inputs.repo-url }}
@@ -13,53 +32,236 @@ jobs:
           submodules: recursive
           path: .
 
-      - name: 配置Git用户信息（gclient必需）
+      # 步骤2：配置Git用户信息（gclient必需）
+      - name: 配置Git用户信息
         run: |
           git config --global user.name kiwiliao62
           git config --global user.email qiweiliao@qq.com
           echo "✅ Git身份配置完成"
 
-      # 新增：安装node.js + Python基础依赖
-      - name: 安装系统级 node.js + Python 依赖
+      # 步骤3：安装系统级依赖（匹配Codespace环境）
+      - name: 安装系统级依赖（node.js/Python/zip）
         run: |
-          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-          sudo apt-get install -y nodejs python3-pip python3-setuptools
+          # 安装node.js（和Codespace预装版本对齐）
+          curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+          # 更新源并安装依赖
+          sudo apt-get update && sudo apt-get install -y \
+            nodejs python3-pip python3-setuptools zip unzip
+          # 验证安装结果
           node -v && npm -v
-          echo "✅ node.js + Python 基础依赖安装完成"
+          echo "✅ 系统依赖（node.js/Python/zip）安装完成"
 
-      # 修改：修复depot_tools环境变量（加PYTHONPATH）
-      - name: 安装depot_tools（按DEPS配置同步）
+      # 步骤4：安装并配置depot_tools（关键：即时生效）
+      - name: 安装并配置depot_tools
         run: |
-          if [ ! -d "$DEPOT_PATH" ]; then
-            mkdir -p $(dirname $DEPOT_PATH)
-            git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_PATH"
+          # 定义depot_tools实际路径
+          DEPOT_TOOLS_PATH="$GITHUB_WORKSPACE/$DEPOT_PATH"
+          # 克隆depot_tools（不存在则创建）
+          if [ ! -d "$DEPOT_TOOLS_PATH" ]; then
+            mkdir -p $(dirname $DEPOT_TOOLS_PATH)
+            git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_PATH"
           fi
-          echo "$GITHUB_WORKSPACE/$DEPOT_PATH" >> $GITHUB_PATH
-          echo "PYTHONPATH=$GITHUB_WORKSPACE/$DEPOT_PATH:$PYTHONPATH" >> $GITHUB_ENV
-          ls $GITHUB_WORKSPACE/$DEPOT_PATH/node.py || echo "❌ depot_tools node.py 缺失"
-          echo "✅ depot_tools路径+PYTHONPATH配置完成"
+          # 1. 临时生效（当前step立即可用）
+          export PATH="$DEPOT_TOOLS_PATH:$PATH"
+          export PYTHONPATH="$DEPOT_TOOLS_PATH:$PYTHONPATH"
+          # 2. 永久生效（后续step可用）
+          echo "$DEPOT_TOOLS_PATH" >> $GITHUB_PATH
+          echo "PYTHONPATH=$DEPOT_TOOLS_PATH:$PYTHONPATH" >> $GITHUB_ENV
+          # 验证depot_tools核心文件
+          which gclient && which gn && which autoninja
+          ls -l "$DEPOT_TOOLS_PATH/node.py"
+          echo "✅ depot_tools配置完成且验证通过"
 
-      # 修改：强制同步depot_tools依赖
-      - name: 按DEPS同步所有依赖（核心步骤）
+      # 步骤5：按DEPS同步所有依赖（核心）
+      - name: 同步gclient依赖
         run: |
+          # 显式加载环境变量（兜底）
+          export PATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PATH"
+          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PYTHONPATH"
           cd $GITHUB_WORKSPACE
+          # 配置gclient并同步依赖
           gclient config --unmanaged .
           gclient sync --force --reset --no-history --verbose 2>&1 | tee gclient-sync.log
-          if [ -f "$DEPOT_PATH/node.py" ]; then
-            echo "✅ depot_tools node.py 存在"
+          # 验证依赖同步结果
+          if [ -f "build/config/gclient_args.gni" ]; then
+            echo "✅ gclient依赖同步完成"
           else
-            echo "❌ depot_tools node.py 缺失，同步失败"
+            echo "❌ 依赖同步失败，文件缺失"
             exit 1
           fi
-          echo "✅ 按DEPS同步依赖完成"
 
-      # 原有步骤（验证gclient_args.gni、npm安装、gn gen等）...
-
-      # 新增：编译前环境变量兜底
-      - name: 编译前环境变量兜底
+      # 步骤6：npm安装项目依赖
+      - name: npm安装项目依赖
         run: |
           cd $GITHUB_WORKSPACE
-          export PYTHONPATH=$GITHUB_WORKSPACE/$DEPOT_PATH:$PYTHONPATH
-          python3 -c "import node; print('✅ node模块导入成功')" || (echo "❌ node模块导入失败" && exit 1)
+          npm install --registry=https://registry.npmmirror.com 2>&1 | tee npm-install.log
+          echo "✅ npm依赖安装完成"
 
-      # 原有编译步骤...
+      # 步骤7：执行gn gen（标准配置）
+      - name: 执行gn gen生成构建配置
+        run: |
+          # 显式加载环境变量
+          export PATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PATH"
+          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PYTHONPATH"
+          cd $GITHUB_WORKSPACE
+          # 生成构建配置（适配Runner资源限制）
+          gn gen out/Default --args='
+            is_debug=false
+            target_os="linux"
+            target_cpu="x64"
+            enable_ninja_monitor=false
+          ' 2>&1 | tee gn-gen.log
+          # 验证配置生成
+          if [ -f "out/Default/build.ninja" ]; then
+            echo "✅ gn gen配置完成"
+          else
+            echo "❌ gn gen失败，无build.ninja文件"
+            exit 1
+          fi
+
+      # 步骤8：编译前 - 子模块目录批量打包上传
+      - name: 遍历子模块并批量打包（编译前）
+        run: |
+          cd $GITHUB_WORKSPACE
+          # 获取所有子模块路径（去重、过滤空行）
+          git submodule foreach --quiet 'echo $path' > submodules-list.txt
+          # 为每个子模块单独打包
+          while IFS= read -r submodule_path; do
+            if [ -n "$submodule_path" ] && [ -d "$submodule_path" ]; then
+              # 子模块名（替换路径分隔符为-，避免命名冲突）
+              submodule_name=$(echo "$submodule_path" | tr '/' '-')
+              # 打包子模块（排除.git目录，减小体积）
+              zip -r "submodule-${submodule_name}.zip" "$submodule_path" -x "*/.git/*"
+              echo "✅ 子模块打包完成：submodule-${submodule_name}.zip"
+            fi
+          done < submodules-list.txt
+        if: always()
+
+      - name: 上传所有子模块包（编译前）
+        uses: actions/upload-artifact@v4
+        with:
+          name: submodules-packages
+          path: ${{ github.workspace }}/submodule-*.zip
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+        if: always()
+
+      # 步骤9：目标查询（用于分析）
+      - name: 🔍 目标查询（分析用）
+        run: |
+          cd $GITHUB_WORKSPACE
+          echo "======================================================"
+          echo "🎯 目标查询日志"
+          echo "======================================================"
+          gn ls out/Default | grep -E "^//:devtools" | sort > devtools-targets.log
+          gn ls out/Default | grep -E "devtools_frontend" | sort >> devtools-targets.log
+          cat devtools-targets.log
+          echo "======================================================"
+
+      # 步骤10：编译前最终环境验证（匹配Codespace）
+      - name: 编译前最终环境验证
+        run: |
+          # 完全匹配Codespace执行时的环境
+          export PATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PATH"
+          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PYTHONPATH"
+          # 1. 验证gn/autoninja命令
+          which gn && which autoninja
+          # 2. 验证Python导入node模块
+          python3 -c "import node; print('✅ node模块导入成功')"
+          # 3. 验证node.js版本
+          node -v
+          echo "✅ 编译环境完全匹配Codespace，准备编译"
+
+      # 步骤11：执行autoninja编译（核心编译步骤）
+      - name: 执行autoninja编译
+        run: |
+          # 保持环境和Codespace一致
+          export PATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PATH"
+          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PYTHONPATH"
+          cd $GITHUB_WORKSPACE
+          echo "======================================================"
+          echo "🚀 编译日志"
+          echo "======================================================"
+          # 执行编译并保留完整日志
+          autoninja -C out/Default :devtools_frontend_resources 2>&1 | tee autoninja-build.log
+
+      # 步骤12：编译后 - front_end源码单独打包上传
+      - name: 打包front_end源码目录（编译后）
+        run: |
+          cd $GITHUB_WORKSPACE
+          if [ -d "./front_end" ]; then
+            zip -r "source-front_end.zip" ./front_end -x "*/.git/*" "*/node_modules/*"
+            echo "✅ front_end源码打包完成：source-front_end.zip"
+          else
+            echo "⚠️ front_end目录不存在，跳过打包"
+          fi
+        if: always()
+
+      - name: 上传front_end源码包（编译后）
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-front_end
+          path: ${{ github.workspace }}/source-front_end.zip
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+        if: always()
+
+      # 步骤13：编译后 - out编译产物纯净打包上传
+      - name: 打包out编译产物目录（编译后）
+        run: |
+          cd $GITHUB_WORKSPACE
+          if [ -d "./out/Default" ]; then
+            # 纯净打包（排除ninja缓存、临时文件）
+            zip -r "compile-out-Default.zip" ./out/Default \
+              -x "*/.ninja*" "*/siso*" "*/obj/*" "*/debug_symbols/*"
+            echo "✅ out编译产物打包完成：compile-out-Default.zip"
+          else
+            echo "⚠️ out/Default目录不存在，跳过打包"
+          fi
+        if: always()
+
+      - name: 上传out编译产物包（编译后）
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-out-Default
+          path: ${{ github.workspace }}/compile-out-Default.zip
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+        if: always()
+
+      # 步骤14：上传所有调试日志（失败时分析用）
+      - name: 🔴 上传所有调试日志
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-debug-logs
+          path: |
+            out/Default/siso_output
+            out/Default/siso.INFO
+            out/Default/siso_failed_commands.sh
+            gclient-sync.log
+            npm-install.log
+            gn-gen.log
+            autoninja-build.log
+            devtools-targets.log
+            .gclient
+            BUILD.gn
+        if: failure()
+
+      # 步骤15：上传原始产物（分析用）
+      - name: 上传产物（原始out目录）
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            out/Default/
+            !out/Default/*.ninja*
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+        if: always()
+
+      # 步骤16：全流程结束提示
+      - name: 全流程结束
+        run: |
+          echo "🎉 全流程执行完成！"
+          echo "📦 产物说明："
+          echo "  - submodules-packages：所有子模块单独包（编译前）"
+          echo "  - source-front_end：front_end源码包（编译后）"
+          echo "  - compile-out-Default：out编译产物纯净包（编译后）"
+          echo "  - full-debug-logs：调试日志（失败时上传）"
+          echo "  - build-artifacts：原始out产物（分析用）"
