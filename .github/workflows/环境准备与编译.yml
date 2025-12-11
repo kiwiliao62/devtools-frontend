@@ -15,6 +15,8 @@ on:
 env:
   ARTIFACT_RETENTION_DAYS: 7
   DEPOT_PATH: "third_party/depot_tools"
+  # 新增：node.py的实际目录（对应你的Windows路径）
+  NODE_PY_DIR: "third_party/node"
 
 jobs:
   build-all:
@@ -56,27 +58,47 @@ jobs:
         run: |
           # 定义depot_tools实际路径
           DEPOT_TOOLS_PATH="$GITHUB_WORKSPACE/$DEPOT_PATH"
+          # 新增：node.py的实际路径
+          NODE_PY_PATH="$GITHUB_WORKSPACE/$NODE_PY_DIR"
+          
+          # 验证node.py是否存在（核心前置）
+          if [ -f "$NODE_PY_PATH/node.py" ]; then
+            echo "✅ 找到node.py：$NODE_PY_PATH/node.py"
+          else
+            echo "❌ 未找到node.py，请检查子模块是否拉取成功"
+            ls -la "$GITHUB_WORKSPACE/third_party/" # 打印目录排查
+            exit 1
+          fi
+
           # 克隆depot_tools（不存在则创建）
           if [ ! -d "$DEPOT_TOOLS_PATH" ]; then
             mkdir -p $(dirname $DEPOT_TOOLS_PATH)
             git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_PATH"
           fi
           # 1. 临时生效（当前step立即可用）
+          # 修改：补充NODE_PY_PATH到PYTHONPATH
           export PATH="$DEPOT_TOOLS_PATH:$PATH"
-          export PYTHONPATH="$DEPOT_TOOLS_PATH:$DEPOT_TOOLS_PATH/python:$PYTHONPATH" # 补充python子目录
+          export PYTHONPATH="$NODE_PY_PATH:$DEPOT_TOOLS_PATH:$DEPOT_TOOLS_PATH/python:$PYTHONPATH" 
           # 2. 永久生效（后续step可用）
           echo "$DEPOT_TOOLS_PATH" >> $GITHUB_PATH
-          echo "PYTHONPATH=$DEPOT_TOOLS_PATH:$DEPOT_TOOLS_PATH/python:$PYTHONPATH" >> $GITHUB_ENV
+          # 修改：补充NODE_PY_PATH到全局PYTHONPATH
+          echo "PYTHONPATH=$NODE_PY_PATH:$DEPOT_TOOLS_PATH:$DEPOT_TOOLS_PATH/python:$PYTHONPATH" >> $GITHUB_ENV
           # 验证depot_tools核心命令（仅验证命令，不验证模块）
           which gclient && which gn && which autoninja
-          echo "✅ depot_tools配置完成（核心命令可用）"
+          # 新增：验证node模块能导入
+          python3 -c "import node; print('✅ node模块导入成功')" || {
+            echo "❌ node模块导入失败，路径：$NODE_PY_PATH"
+            exit 1
+          }
+          echo "✅ depot_tools配置完成（核心命令+node模块可用）"
 
       # 步骤5：按DEPS同步所有依赖（核心）
       - name: 同步gclient依赖
         run: |
           # 显式加载环境变量（兜底）
           export PATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PATH"
-          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$GITHUB_WORKSPACE/$DEPOT_PATH/python:$PYTHONPATH"
+          # 修改：补充NODE_PY_PATH到PYTHONPATH
+          export PYTHONPATH="$GITHUB_WORKSPACE/$NODE_PY_DIR:$GITHUB_WORKSPACE/$DEPOT_PATH:$GITHUB_WORKSPACE/$DEPOT_PATH/python:$PYTHONPATH"
           cd $GITHUB_WORKSPACE
           # 配置gclient并同步依赖
           gclient config --unmanaged .
@@ -101,7 +123,8 @@ jobs:
         run: |
           # 显式加载环境变量
           export PATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PATH"
-          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$GITHUB_WORKSPACE/$DEPOT_PATH/python:$PYTHONPATH"
+          # 修改：补充NODE_PY_PATH到PYTHONPATH
+          export PYTHONPATH="$GITHUB_WORKSPACE/$NODE_PY_DIR:$GITHUB_WORKSPACE/$DEPOT_PATH:$GITHUB_WORKSPACE/$DEPOT_PATH/python:$PYTHONPATH"
           cd $GITHUB_WORKSPACE
           # 生成构建配置（适配Runner资源限制）
           gn gen out/Default --args='
@@ -161,11 +184,14 @@ jobs:
         run: |
           # 完全匹配Codespace执行时的环境
           export PATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PATH"
-          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$GITHUB_WORKSPACE/$DEPOT_PATH/python:$PYTHONPATH"
+          # 修改：补充NODE_PY_PATH到PYTHONPATH
+          export PYTHONPATH="$GITHUB_WORKSPACE/$NODE_PY_DIR:$GITHUB_WORKSPACE/$DEPOT_PATH:$GITHUB_WORKSPACE/$DEPOT_PATH/python:$PYTHONPATH"
           # 1. 仅验证核心编译命令（gn/autoninja）
           which gn && which autoninja && echo "✅ gn/autoninja命令可用"
           # 2. 仅验证系统node.js（编译依赖）
           node -v && echo "✅ node.js版本验证通过"
+          # 新增：验证node模块
+          python3 -c "import node; print('✅ node模块验证通过')"
           echo "✅ 编译环境验证通过，准备编译"
 
       # 步骤11：执行autoninja编译（核心编译步骤）
@@ -173,7 +199,8 @@ jobs:
         run: |
           # 保持环境和Codespace一致
           export PATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$PATH"
-          export PYTHONPATH="$GITHUB_WORKSPACE/$DEPOT_PATH:$GITHUB_WORKSPACE/$DEPOT_PATH/python:$PYTHONPATH"
+          # 修改：补充NODE_PY_PATH到PYTHONPATH
+          export PYTHONPATH="$GITHUB_WORKSPACE/$NODE_PY_DIR:$GITHUB_WORKSPACE/$DEPOT_PATH:$GITHUB_WORKSPACE/$DEPOT_PATH/python:$PYTHONPATH"
           cd $GITHUB_WORKSPACE
           echo "======================================================"
           echo "🚀 编译日志"
